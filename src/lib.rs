@@ -2,14 +2,20 @@
 pub mod client;
 
 pub mod api;
+pub mod error;
 
-use std::fmt;
+pub use error::Error;
+
+use std::{convert::TryFrom, fmt};
+
+pub const ROOT_URI: &str = "https://api.clearlydefined.io";
 
 // https://api.clearlydefined.io/api-docs/#/definitions/get_definitions
 // type/provider/namespace/name/revision
 // https://api.clearlydefined.io
 
 /// The "type" of the component
+#[derive(Clone, Copy, PartialEq, serde::Deserialize)]
 pub enum Shape {
     /// A Rust Crate
     Crate,
@@ -27,14 +33,15 @@ pub enum Shape {
 }
 
 impl Shape {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Crate => "crate",
-            Git => "git",
+            Self::Crate => "crate",
+            Self::Git => "git",
         }
     }
 }
 
+#[derive(Clone, Copy, PartialEq, serde::Deserialize)]
 pub enum Provider {
     /// The canonical crates.io registry for Rust crates
     Cratesio,
@@ -42,10 +49,10 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Cratesio => "cratesio",
-            Github => "github",
+            Self::Cratesio => "cratesio",
+            Self::Github => "github",
         }
     }
 }
@@ -94,7 +101,7 @@ pub struct Coordinate {
     pub curation_pr: Option<u32>,
 }
 
-pub trait Coord {
+pub trait Coord: Sized {
     fn shape(&self) -> Shape;
     fn provider(&self) -> Provider;
     fn namespace(&self) -> Option<&str> {
@@ -105,9 +112,12 @@ pub trait Coord {
     fn curation_pr(&self) -> Option<u32> {
         None
     }
+    fn display(&self) -> CoordDisp<'_, Self>;
 }
 
-impl<T> fmt::Display for T
+pub struct CoordDisp<'a, T>(&'a T);
+
+impl<'a, T> fmt::Display for CoordDisp<'a, T>
 where
     T: Coord,
 {
@@ -115,17 +125,47 @@ where
         write!(
             f,
             "{}/{}/{}/{}/{}",
-            self.shape().as_str(),
-            self.provider().as_str(),
-            self.namespace().unwrap_or("-"),
-            self.name(),
-            self.version()
+            self.0.shape().as_str(),
+            self.0.provider().as_str(),
+            self.0.namespace().unwrap_or("-"),
+            self.0.name(),
+            self.0.version()
         )?;
 
-        if let Some(pr) = self.curation_pr() {
+        if let Some(pr) = self.0.curation_pr() {
             write!(f, "/pr/{}", pr)
         } else {
             Ok(())
+        }
+    }
+}
+
+pub trait ApiResponse<B>: Sized + TryFrom<http::Response<B>, Error = Error>
+where
+    B: AsRef<[u8]>,
+{
+    fn try_from_parts(resp: http::response::Response<B>) -> Result<Self, Error> {
+        if resp.status().is_success() {
+            Self::try_from(resp)
+        } else {
+            // If we get an error, but with a JSON payload, attempt to deserialize
+            // an ApiError from it, otherwise fallback to the simple HttpStatus
+            // Clearly defined doesn't seem to ever return structured errors?
+            // if let Some(ct) = resp
+            //     .headers()
+            //     .get(http::header::CONTENT_TYPE)
+            //     .and_then(|ct| ct.to_str().ok())
+            // {
+            //     if ct.starts_with("application/json") {
+            //         if let Ok(api_err) =
+            //             serde_json::from_slice::<error::ApiError>(resp.body().as_ref())
+            //         {
+            //             return Err(Error::API(api_err));
+            //         }
+            //     }
+            // }
+
+            Err(Error::from(resp.status()))
         }
     }
 }
